@@ -5,8 +5,8 @@ use chrono::{NaiveDateTime};
 use regex::Regex;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Write};
-use std::time::Instant;
 use lazy_static::lazy_static;
+use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -25,26 +25,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Analisa o arquivo de log com filtros e exibe um resumo detalhado
+    /// Analyze the log file with filters
     Analyze {
-        /// Data/hora de início do intervalo de filtragem (formato dd/mm/yyyy hh:mm)
+        /// Start datetime for filter (format dd/mm/yyyy hh:mm)
         #[arg(short = 's', long)]
         start_time: Option<String>,
 
-        /// Data/hora de fim do intervalo de filtragem (formato dd/mm/yyyy hh:mm)
+        /// End datetime for filter(format dd/mm/yyyy hh:mm)
         #[arg(short = 'e', long)]
         end_time: Option<String>,
 
-        /// Nível de log (ERROR, WARNING, INFO, etc.)
         #[arg(short = 'l', long)]
         log_level: Option<LogLevel>,
 
-        /// Palavra-chave para filtrar os logs
+        /// Keyword para filtragem
         #[arg(short = 'k', long)]
         keyword: Option<String>,
     },
 
-    /// Exibe um resumo geral do arquivo de log
+    /// Shows an overview of the log file
     Overview,
 }
 
@@ -69,10 +68,8 @@ pub struct LogEntry {
 }
 
 fn main() -> io::Result<()> {
-    let start = Instant::now();
     let args = Cli::parse();
 
-    // Carrega o arquivo de log
     let log_entries = load_logs(&args.log_path)?;
 
     match args.command {
@@ -82,7 +79,6 @@ fn main() -> io::Result<()> {
             log_level,
             keyword,
         } => {
-            // Filtra os logs conforme os parâmetros
             let filtered_logs = filter_logs(&log_entries, start_time, end_time, log_level, keyword);
             display_logs(filtered_logs, args.output);
         },
@@ -91,9 +87,6 @@ fn main() -> io::Result<()> {
             display_overview(summary);
         }
     }
-
-    let duration = start.elapsed();
-    println!("Tempo de execução: {:?}", duration);
     Ok(())
 }
 
@@ -113,7 +106,6 @@ fn load_logs(log_path: &str) -> io::Result<Vec<LogEntry>> {
 }
 
 fn parse_log_line(line: &str) -> Option<LogEntry> {
-    // Assumindo um formato de log "dd/mm/yyyy hh:mm LEVEL Mensagem"
     if let Some(caps) = LOG_REGEX.captures(line) {
         let timestamp = NaiveDateTime::parse_from_str(&caps[1], "%d/%m/%Y %H:%M").ok()?;
         let log_type = caps[2].to_string();
@@ -125,38 +117,46 @@ fn parse_log_line(line: &str) -> Option<LogEntry> {
     }
 }
 
-fn filter_logs<'a>(
-    logs: &'a [LogEntry],
+fn filter_logs(
+    logs: &[LogEntry],
     start_time: Option<String>,
     end_time: Option<String>,
     log_level: Option<LogLevel>,
     keyword: Option<String>,
-) -> Vec<&'a LogEntry> {
+) -> Vec<&LogEntry> {
     let start_dt = start_time.and_then(|s| NaiveDateTime::parse_from_str(&s, "%d/%m/%Y %H:%M").ok());
     let end_dt = end_time.and_then(|e| NaiveDateTime::parse_from_str(&e, "%d/%m/%Y %H:%M").ok());
     let level_str = log_level.map(|level| format!("{:?}", level).to_uppercase());
     let keyword_str = keyword.unwrap_or_default();
 
-    logs.iter()
-        .filter(|log| {
-            let mut valid = true;
+    let filter = |log: &&LogEntry| {
+        let mut valid = true;
 
-            if let Some(start) = start_dt {
-                valid &= log.timestamp >= start;
-            }
-            if let Some(end) = end_dt {
-                valid &= log.timestamp <= end;
-            }
-            if let Some(level) = &level_str {
-                valid &= log.log_type == *level;
-            }
-            if !keyword_str.is_empty() && !log.message.contains(&keyword_str) {
-                valid &= false;
-            }
+        if let Some(start) = start_dt {
+            valid &= log.timestamp >= start;
+        }
+        if let Some(end) = end_dt {
+            valid &= log.timestamp <= end;
+        }
+        if let Some(level) = &level_str {
+            valid &= log.log_type == *level;
+        }
+        if !keyword_str.is_empty() && !log.message.contains(&keyword_str) {
+            valid &= false;
+        }
 
-            valid
-        })
-        .collect()
+        valid
+    };
+
+    if logs.len() > 1000 {  // Ajuste esse valor conforme necessário
+        logs.par_iter()
+            .filter(filter)
+            .collect()
+    } else {
+        logs.iter()
+            .filter(filter)
+            .collect()
+    }
 }
 
 
@@ -174,19 +174,17 @@ fn display_logs(logs: Vec<&LogEntry>, output: Option<String>) {
     }
 
     if let Some(out) = output {
-        // Salva o output em um arquivo, caso especificado
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(out)
-            .expect("Erro ao abrir arquivo de output");
+            .expect("Error to open output file");
 
-        writeln!(file, "{table}").expect("Erro ao escrever no arquivo de output");
+        writeln!(file, "{table}").expect("Error to write to file");
     } else {
-        // Exibe na saída padrão
         println!("{table}");
-        println!("Número de registros encontrados: {}", table.row_count());
+        println!("Number of results: {}", table.row_count());
     }
 }
 
